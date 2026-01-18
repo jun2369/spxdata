@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend, BarChart, Bar, XAxis, YAxis, CartesianGrid, LineChart, Line } from 'recharts';
+import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis, CartesianGrid, LineChart, Line, Legend } from 'recharts';
 import './DSPKPI.css';
 
 interface RouteData {
@@ -35,6 +35,7 @@ interface DSPKPIProps {
 interface KPIData {
   fleeName: string;
   statusCounts: { [key: string]: number };
+  trackingByStatus: { [key: string]: string[] }; // 新增：存储每个状态对应的 TrackingNo 列表
   total: number;
   successRate: number;
   attemptRate: number;
@@ -49,7 +50,13 @@ interface TimeSeriesData {
   total: number;
 }
 
-const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
+// 定义展开详情的 key 类型
+interface ExpandedCell {
+  fleeName: string;
+  status: string;
+}
+
+const DSPKPI: React.FC<DSPKPIProps> = ({ data }) => {
   const [kpiData, setKpiData] = useState<KPIData[]>([]);
   const [selectedFlee, setSelectedFlee] = useState<string>('all');
   const [timeSeriesData, setTimeSeriesData] = useState<TimeSeriesData[]>([]);
@@ -58,23 +65,40 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
     key: 'fleeName' | 'total' | 'successRate';
     direction: 'asc' | 'desc';
   }>({ key: 'total', direction: 'desc' });
+  
+  // 新增：跟踪当前展开的单元格
+  const [expandedCell, setExpandedCell] = useState<ExpandedCell | null>(null);
 
   useEffect(() => {
     // Process KPI data by FleeName
-    const fleeMap = new Map<string, { [key: string]: number }>();
+    const fleeMap = new Map<string, { 
+      statusCounts: { [key: string]: number };
+      trackingByStatus: { [key: string]: string[] };
+    }>();
     const dateMap = new Map<string, { [key: string]: number }>();
     
     data.forEach(item => {
       const fleeName = item.FleeName || 'Unknown';
       if (!fleeMap.has(fleeName)) {
-        fleeMap.set(fleeName, {});
+        fleeMap.set(fleeName, {
+          statusCounts: {},
+          trackingByStatus: {}
+        });
       }
       
-      const statusCounts = fleeMap.get(fleeName)!;
+      const fleeData = fleeMap.get(fleeName)!;
       // Only count FinalStatus with values, no default values
       if (item.FinalStatus && item.FinalStatus.trim() !== '') {
         const status = item.FinalStatus;
-        statusCounts[status] = (statusCounts[status] || 0) + 1;
+        fleeData.statusCounts[status] = (fleeData.statusCounts[status] || 0) + 1;
+        
+        // 收集 TrackingNo
+        if (!fleeData.trackingByStatus[status]) {
+          fleeData.trackingByStatus[status] = [];
+        }
+        if (item.TrackingNo) {
+          fleeData.trackingByStatus[status].push(item.TrackingNo);
+        }
 
         // Process time series data
         if (item.CompleteTime) {
@@ -89,7 +113,8 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
     });
 
     // Calculate KPI metrics
-    const kpiResults: KPIData[] = Array.from(fleeMap.entries()).map(([fleeName, statusCounts]) => {
+    const kpiResults: KPIData[] = Array.from(fleeMap.entries()).map(([fleeName, fleeData]) => {
+      const { statusCounts, trackingByStatus } = fleeData;
       const total = Object.values(statusCounts).reduce((sum, count) => sum + count, 0);
       const delivered = statusCounts['DELIVERED'] || 0;
       // Dynamically calculate other failure types
@@ -101,6 +126,7 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
       return {
         fleeName,
         statusCounts,
+        trackingByStatus,
         total,
         successRate: total > 0 ? (delivered / total) * 100 : 0,
         attemptRate: 0, // No longer using ATTEMPTED
@@ -162,12 +188,9 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
       });
     });
     
-    const totalOtherStatuses = Object.values(allStatuses).reduce((sum, count) => sum + count, 0);
-    
     return {
       totalPackages,
       totalDelivered,
-      totalOtherStatuses,
       allStatuses,
       overallSuccessRate: totalPackages > 0 ? (totalDelivered / totalPackages) * 100 : 0
     };
@@ -191,12 +214,7 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
     }));
   };
 
-  const { totalPackages, totalDelivered, totalOtherStatuses, allStatuses, overallSuccessRate } = getOverallStats();
-
-  // Get top two non-DELIVERED statuses for display
-  const topOtherStatuses = Object.entries(allStatuses)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 2);
+  const { totalPackages, totalDelivered, allStatuses, overallSuccessRate } = getOverallStats();
 
   // Sorting functionality
   const handleSort = (key: 'fleeName' | 'total' | 'successRate') => {
@@ -241,7 +259,31 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
     });
   };
 
-  const renderCustomLabel = ({ cx, cy, midAngle, innerRadius, outerRadius, percent, name }: any) => {
+  // 新增：处理 View Details 按钮点击
+  const handleViewDetails = (fleeName: string, status: string) => {
+    if (expandedCell && expandedCell.fleeName === fleeName && expandedCell.status === status) {
+      setExpandedCell(null); // 点击同一个，关闭
+    } else {
+      setExpandedCell({ fleeName, status }); // 打开新的
+    }
+  };
+
+  // 新增：检查单元格是否展开
+  const isCellExpanded = (fleeName: string, status: string) => {
+    return expandedCell && expandedCell.fleeName === fleeName && expandedCell.status === status;
+  };
+
+  // 新增：获取需要显示 View Details 按钮的状态列表（排除 DELIVERED）
+  const getDetailableStatuses = () => {
+    return Array.from(new Set(
+      kpiData.flatMap(kpi => Object.keys(kpi.statusCounts))
+    ))
+      .filter(status => status !== 'DELIVERED')
+      .sort()
+      .slice(0, 4);
+  };
+
+  const renderCustomLabel = ({ cx, cy, midAngle, outerRadius, percent, name }: any) => {
     if (percent < 0.01) return null; // Don't show labels for less than 1%
     
     const RADIAN = Math.PI / 180;
@@ -260,6 +302,71 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
       >
         {`${name}: ${(percent * 100).toFixed(2)}%`}
       </text>
+    );
+  };
+
+  // 新增：渲染带有 View Details 按钮的状态单元格
+  const renderStatusCell = (kpi: KPIData, status: string, className: string) => {
+    const count = kpi.statusCounts[status] || 0;
+    const trackingNumbers = kpi.trackingByStatus[status] || [];
+    const isExpanded = isCellExpanded(kpi.fleeName, status);
+    
+    // 复制所有 TrackingNo 到剪贴板
+    const handleCopyAll = (e: React.MouseEvent) => {
+      e.stopPropagation(); // 防止触发关闭弹窗
+      const text = trackingNumbers.join('\n');
+      navigator.clipboard.writeText(text).then(() => {
+        // 可以添加一个临时提示
+        const btn = e.currentTarget as HTMLButtonElement;
+        const originalText = btn.innerHTML;
+        btn.innerHTML = '✓';
+        btn.classList.add('copied');
+        setTimeout(() => {
+          btn.innerHTML = originalText;
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    };
+    
+    return (
+      <td key={status} className={`status-cell ${className}`} style={{ textAlign: 'center', position: 'relative' }}>
+        <div className="status-cell-content">
+          <span className="status-count">{count.toLocaleString()}</span>
+          {count > 0 && (
+            <button 
+              className={`view-details-btn ${isExpanded ? 'active' : ''}`}
+              onClick={() => handleViewDetails(kpi.fleeName, status)}
+              title="View Tracking Numbers"
+            >
+              {isExpanded ? '▼' : '▶'}
+            </button>
+          )}
+        </div>
+        {isExpanded && trackingNumbers.length > 0 && (
+          <div className="tracking-popup">
+            <div className="tracking-popup-header">
+              <span>{status.replace(/_/g, ' ')} - {kpi.fleeName}</span>
+              <div className="header-actions">
+                <button 
+                  className="copy-all-btn"
+                  onClick={handleCopyAll}
+                  title="Copy all tracking numbers"
+                >
+                  📋
+                </button>
+                <span className="tracking-count-badge">{trackingNumbers.length} items</span>
+              </div>
+            </div>
+            <div className="tracking-list">
+              {trackingNumbers.map((tracking, idx) => (
+                <div key={idx} className="tracking-item">
+                  {tracking}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </td>
     );
   };
 
@@ -320,7 +427,7 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
         {Object.entries(allStatuses)
           .sort((a, b) => b[1] - a[1])
           .slice(0, 4) // Show maximum 4 other status cards
-          .map(([status, count], index) => (
+          .map(([status, count]) => (
             <div key={status} className={`stat-card ${
               status === 'FAILED_ATTEMPT' ? 'danger' : 
               status === 'MIS_SORT_RETURN' ? 'warning' :
@@ -502,16 +609,9 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
                   </th>
                   <th style={{ textAlign: 'center' }}>Delivered</th>
                   {/* Dynamically generate column headers for other statuses */}
-                  {Array.from(new Set(
-                    kpiData.flatMap(kpi => Object.keys(kpi.statusCounts))
-                  ))
-                    .filter(status => status !== 'DELIVERED')
-                    .sort()
-                    .slice(0, 4) // Show maximum 4 other statuses
-                    .map(status => (
-                      <th key={status} style={{ textAlign: 'center' }}>{status.replace(/_/g, ' ')}</th>
-                    ))
-                  }
+                  {getDetailableStatuses().map(status => (
+                    <th key={status} style={{ textAlign: 'center' }}>{status.replace(/_/g, ' ')}</th>
+                  ))}
                   <th 
                     onClick={() => handleSort('successRate')}
                     style={{ cursor: 'pointer', userSelect: 'none', textAlign: 'center' }}
@@ -523,40 +623,37 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
                       </span>
                     )}
                   </th>
+                  <th style={{ textAlign: 'center' }}>Volume Handle %</th>
                 </tr>
               </thead>
               <tbody>
                 {getSortedData()
                   .map((kpi, index) => {
-                    // Get all non-DELIVERED statuses
-                    const otherStatuses = Array.from(new Set(
-                      kpiData.flatMap(k => Object.keys(k.statusCounts))
-                    ))
-                      .filter(status => status !== 'DELIVERED')
-                      .sort()
-                      .slice(0, 4);
+                    const otherStatuses = getDetailableStatuses();
+                    const volumeHandle = totalPackages > 0 ? (kpi.total / totalPackages) * 100 : 0;
                     
                     return (
                       <tr key={index}>
                         <td className="fleet-name">{kpi.fleeName}</td>
                         <td style={{ textAlign: 'center' }}>{kpi.total.toLocaleString()}</td>
                         <td className="success-text" style={{ textAlign: 'center' }}>{(kpi.statusCounts['DELIVERED'] || 0).toLocaleString()}</td>
-                        {/* Dynamically show data for other statuses */}
-                        {otherStatuses.map(status => (
-                          <td key={status} className={
+                        {/* 使用新的渲染函数来显示带 View Details 按钮的状态单元格 */}
+                        {otherStatuses.map(status => 
+                          renderStatusCell(
+                            kpi, 
+                            status, 
                             status === 'FAILED_ATTEMPT' ? 'danger-text' : 
                             status === 'MIS_SORT_RETURN' ? 'warning-text' :
                             status === 'RETURNED_SORT_CENTER' ? 'warning-text' : 
                             'danger-text'
-                          } style={{ textAlign: 'center' }}>
-                            {(kpi.statusCounts[status] || 0).toLocaleString()}
-                          </td>
-                        ))}
+                          )
+                        )}
                         <td style={{ textAlign: 'center' }}>
                           <span className={`rate-badge ${kpi.successRate >= 90 ? 'excellent' : kpi.successRate >= 70 ? 'good' : 'poor'}`}>
                             {kpi.successRate.toFixed(2)}%
                           </span>
                         </td>
+                        <td style={{ textAlign: 'center' }}>{volumeHandle.toFixed(2)}%</td>
                       </tr>
                     );
                   })
@@ -565,6 +662,14 @@ const DSPKPI: React.FC<DSPKPIProps> = ({ data, onBack }) => {
             </table>
           </div>
         </div>
+      )}
+      
+      {/* 点击其他区域关闭弹窗的遮罩层 */}
+      {expandedCell && (
+        <div 
+          className="popup-overlay" 
+          onClick={() => setExpandedCell(null)}
+        />
       )}
     </div>
   );
